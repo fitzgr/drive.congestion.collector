@@ -156,7 +156,7 @@ public sealed class TrafficCollectorService : BackgroundService
 
     private async Task CollectAllAsync(CancellationToken ct, bool manual = false)
     {
-        var apiKey = Environment.GetEnvironmentVariable("TOMTOM_API_KEY");
+        var apiKey = LoadTomTomApiKey();
         var points = _config.GetSection("Collector:Points").Get<List<TrafficPoint>>() ?? new();
 
         if (string.IsNullOrWhiteSpace(apiKey) || points.Count == 0)
@@ -169,7 +169,7 @@ public sealed class TrafficCollectorService : BackgroundService
         }
     }
 
-    private async Task CollectPointAsync(string apiKey, TrafficPoint point, CancellationToken ct)
+    private string? LoadTomTomApiKey()\n    {\n        var envKey = Environment.GetEnvironmentVariable("TOMTOM_API_KEY");\n        if (!string.IsNullOrWhiteSpace(envKey)) return envKey.Trim();\n\n        var keyFile = Path.Combine(AppContext.BaseDirectory, "secrets", "tomtom.key");\n        if (!File.Exists(keyFile))\n            keyFile = Path.Combine(Directory.GetCurrentDirectory(), "secrets", "tomtom.key");\n\n        return File.Exists(keyFile) ? File.ReadAllText(keyFile).Trim() : null;\n    }\n\n    private async Task CollectPointAsync(string apiKey, TrafficPoint point, CancellationToken ct)
     {
         try
         {
