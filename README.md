@@ -1,49 +1,52 @@
 # Drive Congestion Collector
 
-A Windows-friendly .NET 8 background collector for building a local history of road congestion observations.
+Windows/.NET 8 collector for learning Hwy 401 congestion patterns between east Oshawa and Pickering in both directions.
 
-## MVP
+## Collection plan
 
-- Runs continuously on your Windows PC.
-- Polls TomTom Traffic Flow every 5 minutes.
-- Stores samples locally in `data/traffic.jsonl`.
-- Exposes a tiny local dashboard/API:
-  - `/api/status`
-  - `/api/samples`
-- Keeps the API key outside source control.
+The collector samples 10 directional points: five westbound and five eastbound.
+
+It runs only from **5:00 AM through 9:59 PM Eastern Time** and samples every **20 minutes**.
+
+That schedule is intentionally conservative for TomTom's current **20,000 free monthly Flow Segment Data requests**:
+
+- 17 collection hours/day
+- 3 cycles/hour
+- 10 API calls/cycle
+- 30-day month = about **15,300 requests**
+- 31-day month = about **15,810 requests**
+
+That leaves roughly 4,000+ requests of headroom for testing/manual samples while remaining below 20,000, assuming TomTom continues to count each Flow Segment Data request as one request and the account has the standard free allowance.
 
 ## Setup
 
-1. Install .NET 8 SDK.
-2. Get a TomTom API key.
-3. Set it in PowerShell:
+Set your key in PowerShell:
 
 ```powershell
 $env:TOMTOM_API_KEY="YOUR_KEY"
-```
-
-4. Edit `appsettings.json` and set `Collector:Point` to the latitude/longitude of the road segment you want to sample.
-5. Run:
-
-```powershell
 dotnet run
 ```
 
-The collector takes one sample immediately, then every 5 minutes.
+The API key is never stored in GitHub.
 
-## Data captured
+## Local data
 
-Each line in `data/traffic.jsonl` stores:
+Samples are appended to:
 
-- timestamp
-- current speed
-- free-flow speed
-- current travel time
-- free-flow travel time
-- confidence
-- road closure flag
-- errors, if any
+```
+data/traffic.jsonl
+```
 
-## Next step
+Each observation contains timestamp, checkpoint, direction, current speed, free-flow speed, travel times, confidence, closure state and calculated slowdown percentage.
 
-This first version watches one representative point. The next iteration should define your full Scarborough-to-cottage corridor as a set of named checkpoints so one five-minute cycle can tell us exactly which portions of the trip are congested.
+## Important checkpoint validation
+
+The initial checkpoint coordinates are deliberately placed near the eastbound/westbound Hwy 401 carriageways. On the first live run, verify that TomTom snaps each point to the intended 401 direction. If any point snaps to the wrong carriageway or ramp, adjust that point before accumulating the month-long dataset.
+
+## API
+
+- `GET /api/status`
+- `GET /api/samples`
+- `POST /api/collect-now`
+
+Manual collection works outside the normal time window and is useful for setup/testing.
