@@ -4,7 +4,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TrafficStore>();
 builder.Services.AddSingleton<TrafficCollectorServiceTrigger>();
-builder.Services.AddHostedService<TrafficCollectorService>();
+builder.Services.AddSingleton<TrafficCollectorService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficCollectorService>());
 
 var app = builder.Build();
 app.UseDefaultFiles();
@@ -14,6 +15,7 @@ app.MapGet("/api/status", (TrafficStore store, IConfiguration config) =>
     Results.Ok(store.GetStatus(config)));
 app.MapGet("/api/samples", async (TrafficStore store, CancellationToken ct) =>
     Results.Ok(await store.ReadSamplesAsync(ct)));
+app.MapPost("/api/validate-points", async (TrafficCollectorService service, CancellationToken ct) => Results.Ok(await service.ValidatePointsAsync(ct)));
 app.MapPost("/api/collect-now", (TrafficCollectorServiceTrigger trigger) =>
 {
     trigger.Trigger();
@@ -22,7 +24,8 @@ app.MapPost("/api/collect-now", (TrafficCollectorServiceTrigger trigger) =>
 
 app.Run();
 
-public sealed record TrafficPoint(string Id, string Label, string Direction, string Point);
+public sealed record TrafficPoint(string Id, string Label, string Direction, string Point, double? Heading = null);
+public sealed record PointValidation(string Id, string Label, string Direction, string RequestedPoint, double? ProjectedLatitude, double? ProjectedLongitude, string? RoadName, string? RoadNumbers, int? Frc, double? SpeedLimitKph, string Status, string? Error);
 
 public sealed record TrafficSample(
     DateTimeOffset Timestamp,
@@ -184,6 +187,61 @@ public sealed class TrafficCollectorService : BackgroundService
             keyFile = Path.Combine(Directory.GetCurrentDirectory(), "secrets", "tomtom.key");
 
         return File.Exists(keyFile) ? File.ReadAllText(keyFile).Trim() : null;
+    }
+
+    public async Task<List<PointValidation>> ValidatePointsAsync(CancellationToken ct)
+    {
+        var key = LoadTomTomApiKey();
+        var points = _config.GetSection("Collector:Points").Get<List<TrafficPoint>>() ?? new();
+        var results = new List<PointValidation>();
+        if (string.IsNullOrWhiteSpace(key)) return results;
+
+        foreach (var p in points)
+        {
+            try
+            {
+                var parts = p.Point.Split(',');
+                var lat = double.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+                var lon = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+                // Snap-to-Roads requires at least two related GPS points. Create a short trace
+                // along the configured heading, centred on the checkpoint.
+                var heading = p.Heading ?? (p.Direction == "WESTBOUND" ? 270d : 90d);
+                var rad = heading * Math.PI / 180d;
+                const double metres = 120d;
+                var dLat = (metres * Math.Cos(rad)) / 111320d;
+                var dLon = (metres * Math.Sin(rad)) / (111320d * Math.Cos(lat * Math.PI / 180d));
+                var lat1 = lat - dLat / 2; var lon1 = lon - dLon / 2;
+                var lat2 = lat + dLat / 2; var lon2 = lon + dLon / 2;
+                var pts = $"{lon1.ToString(System.Globalization.CultureInfo.InvariantCulture)},{lat1.ToString(System.Globalization.CultureInfo.InvariantCulture)};{lon2.ToString(System.Globalization.CultureInfo.InvariantCulture)},{lat2.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                var headings = $"{heading.ToString(System.Globalization.CultureInfo.InvariantCulture)};{heading.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                var fields = "{projectedPoints{geometry{coordinates},properties{snapResult}},route{properties{frc,address{roadName,roadNumbers},speedLimits{value,unit,type}}}}";
+                var url = $"https://api.tomtom.com/snapToRoads/1?key={Uri.EscapeDataString(key)}&points={Uri.EscapeDataString(pts)}&headings={Uri.EscapeDataString(headings)}&fields={Uri.EscapeDataString(fields)}&vehicleType=PassengerCar&measurementSystem=metric&offroadMargin=100";
+                using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
+                response.EnsureSuccessStatusCode();
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var root = doc.RootElement;
+                double? plat=null, plon=null; string? road=null, nums=null; int? frc=null; double? limit=null;
+                if (root.TryGetProperty("projectedPoints", out var pp) && pp.ValueKind==JsonValueKind.Array && pp.GetArrayLength()>0) {
+                    var coords=pp[0].GetProperty("geometry").GetProperty("coordinates");
+                    if(coords.GetArrayLength()>=2){ plon=coords[0].GetDouble(); plat=coords[1].GetDouble(); }
+                }
+                if (root.TryGetProperty("route", out var route) && route.ValueKind==JsonValueKind.Array && route.GetArrayLength()>0) {
+                    foreach(var el in route.EnumerateArray()) {
+                        if(!el.TryGetProperty("properties",out var pr)) continue;
+                        if(frc is null && pr.TryGetProperty("frc",out var f) && f.TryGetInt32(out var fi)) frc=fi;
+                        if(pr.TryGetProperty("address",out var ad)) {
+                            if(road is null && ad.TryGetProperty("roadName",out var rn)) road=rn.GetString();
+                            if(nums is null && ad.TryGetProperty("roadNumbers",out var rns)) nums=rns.ValueKind==JsonValueKind.Array?string.Join(",",rns.EnumerateArray().Select(x=>x.GetString())):rns.ToString();
+                        }
+                        if(limit is null && pr.TryGetProperty("speedLimits",out var sl) && sl.ValueKind==JsonValueKind.Array && sl.GetArrayLength()>0 && sl[0].TryGetProperty("value",out var sv) && sv.TryGetDouble(out var sd)) limit=sd;
+                    }
+                }
+                var highway = frc==0 && limit>=90;
+                results.Add(new PointValidation(p.Id,p.Label,p.Direction,p.Point,plat,plon,road,nums,frc,limit,highway?"VALIDATED_401":"REVIEW",null));
+            }
+            catch(Exception ex) { results.Add(new PointValidation(p.Id,p.Label,p.Direction,p.Point,null,null,null,null,null,null,"ERROR",ex.Message)); }
+        }
+        return results;
     }
 
     private async Task CollectPointAsync(string apiKey, TrafficPoint point, CancellationToken ct)
