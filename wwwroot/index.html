@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Drive Congestion Collector</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 40px auto; padding: 0 20px; background:#f7f7f8; color:#1f2937; }
+    .card { background:white; border-radius:16px; padding:20px; margin-bottom:18px; box-shadow:0 2px 12px rgba(0,0,0,.06); }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:10px; border-bottom:1px solid #eee; text-align:left; font-size:14px; }
+    .big { font-size:32px; font-weight:700; }
+  </style>
+</head>
+<body>
+  <h1>Drive Congestion Collector</h1>
+  <div class="card">
+    <div id="status">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>Recent samples</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Current</th><th>Free flow</th><th>Slowdown</th><th>Confidence</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+<script>
+async function load() {
+  const [status, samples] = await Promise.all([
+    fetch('/api/status').then(r=>r.json()),
+    fetch('/api/samples').then(r=>r.json())
+  ]);
+
+  const last = status.lastSample;
+  document.getElementById('status').innerHTML = last
+    ? `<div class="big">${last.currentSpeedKph ?? '—'} km/h</div>
+       <div>Free flow: ${last.freeFlowSpeedKph ?? '—'} km/h · Last check: ${new Date(last.timestamp).toLocaleString()}</div>
+       <div>${last.error ? 'Error: ' + last.error : ''}</div>`
+    : 'No samples yet.';
+
+  const recent = samples.slice(-50).reverse();
+  document.getElementById('rows').innerHTML = recent.map(s => {
+    const slowdown = (s.currentSpeedKph != null && s.freeFlowSpeedKph)
+      ? Math.round((1 - s.currentSpeedKph / s.freeFlowSpeedKph) * 100) + '%'
+      : '—';
+    return `<tr>
+      <td>${new Date(s.timestamp).toLocaleString()}</td>
+      <td>${s.currentSpeedKph ?? '—'}</td>
+      <td>${s.freeFlowSpeedKph ?? '—'}</td>
+      <td>${slowdown}</td>
+      <td>${s.confidence ?? '—'}</td>
+    </tr>`;
+  }).join('');
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
