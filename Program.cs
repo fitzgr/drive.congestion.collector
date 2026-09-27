@@ -37,6 +37,11 @@ public sealed record TrafficSample(
     double? Confidence,
     bool? RoadClosure,
     double? SlowdownPercent,
+    string? RequestedPoint,
+    double? MatchedLatitude,
+    double? MatchedLongitude,
+    string? SegmentGeometry,
+    bool? LooksLikeHighway,
     string? Error);
 
 public sealed class TrafficStore
@@ -208,7 +213,13 @@ public sealed class TrafficCollectorService : BackgroundService
                 TryDouble(fsd, "freeFlowTravelTime"),
                 TryDouble(fsd, "confidence"),
                 fsd.TryGetProperty("roadClosure", out var rc) && rc.ValueKind is JsonValueKind.True or JsonValueKind.False ? rc.GetBoolean() : null,
-                slowdown, null);
+                slowdown,
+                point.Point,
+                FirstCoordinate(fsd)?.Lat,
+                FirstCoordinate(fsd)?.Lon,
+                CoordinateSummary(fsd),
+                free.HasValue ? free.Value >= 85 : null,
+                null);
 
             await _store.AppendAsync(sample, ct);
         }
@@ -217,8 +228,41 @@ public sealed class TrafficCollectorService : BackgroundService
             await _store.AppendAsync(new TrafficSample(
                 DateTimeOffset.Now, "tomtom-flow-segment",
                 point.Id, point.Label, point.Direction,
-                null, null, null, null, null, null, null, ex.Message), ct);
+                null, null, null, null, null, null, null,
+                point.Point, null, null, null, null, ex.Message), ct);
         }
+    }
+
+    private sealed record Coordinate(double Lat, double Lon);
+
+    private static Coordinate? FirstCoordinate(JsonElement fsd)
+    {
+        if (!fsd.TryGetProperty("coordinates", out var coordinates) ||
+            coordinates.ValueKind != JsonValueKind.Object ||
+            !coordinates.TryGetProperty("coordinate", out var array) ||
+            array.ValueKind != JsonValueKind.Array ||
+            array.GetArrayLength() == 0) return null;
+
+        var first = array[0];
+        if (!first.TryGetProperty("latitude", out var lat) || !lat.TryGetDouble(out var latitude) ||
+            !first.TryGetProperty("longitude", out var lon) || !lon.TryGetDouble(out var longitude)) return null;
+        return new Coordinate(latitude, longitude);
+    }
+
+    private static string? CoordinateSummary(JsonElement fsd)
+    {
+        if (!fsd.TryGetProperty("coordinates", out var coordinates) ||
+            !coordinates.TryGetProperty("coordinate", out var array) ||
+            array.ValueKind != JsonValueKind.Array) return null;
+
+        var pts = new List<string>();
+        foreach (var p in array.EnumerateArray())
+        {
+            if (p.TryGetProperty("latitude", out var lat) && lat.TryGetDouble(out var latitude) &&
+                p.TryGetProperty("longitude", out var lon) && lon.TryGetDouble(out var longitude))
+                pts.Add($"{latitude:F6},{longitude:F6}");
+        }
+        return string.Join(";", pts);
     }
 
     private static double? TryDouble(JsonElement element, string name)
