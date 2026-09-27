@@ -4,3 +4,4 @@ data/
 *.user
 *.suo
 .env
+\n# Local API credentials - never commit\nsecrets/\n
