@@ -1,59 +1,49 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Drive Congestion Collector</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 40px auto; padding: 0 20px; background:#f7f7f8; color:#1f2937; }
-    .card { background:white; border-radius:16px; padding:20px; margin-bottom:18px; box-shadow:0 2px 12px rgba(0,0,0,.06); }
-    table { width:100%; border-collapse:collapse; }
-    th,td { padding:10px; border-bottom:1px solid #eee; text-align:left; font-size:14px; }
-    .big { font-size:32px; font-weight:700; }
-  </style>
-</head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>401 Traffic Monitor</title>
+<style>
+:root{--bg:#071421;--panel:#0d2031;--line:#244159;--text:#eef6ff;--muted:#9db0c4;--green:#36dc79;--yellow:#ffd43b;--orange:#ff9138;--red:#ff414b}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#071421,#091a2a);color:var(--text);font:14px system-ui,Segoe UI,sans-serif}
+header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:28px}h2{margin:0 0 4px}.sub,.muted{color:var(--muted)}
+main{padding:16px;max-width:1600px;margin:auto}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{background:rgba(13,32,49,.94);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.points{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:14px}.point{border:1px solid var(--line);border-radius:9px;padding:12px;text-align:center}.speed{font-size:20px;font-weight:800;margin:6px}.track{height:5px;background:#7f9bb5;margin:18px 6%;position:relative}
+.dotrow{display:flex;justify-content:space-between;margin-top:-26px;padding:0 4%}.dot{width:22px;height:22px;border:2px solid white;border-radius:50%}
+.green{background:var(--green)}.yellow{background:var(--yellow)}.orange{background:var(--orange)}.red{background:var(--red)}
+.heatwrap{overflow-x:auto}.heat{display:grid;grid-template-columns:44px repeat(17,1fr);gap:2px;min-width:720px;margin-top:14px}.cell{height:29px;border-radius:2px;background:#173047}.label{display:flex;align-items:center;color:var(--muted);font-size:12px}.time{text-align:center;color:var(--muted);font-size:10px}
+.legend{display:flex;gap:20px;flex-wrap:wrap;margin-top:13px;color:var(--muted)}.sw{width:13px;height:13px;border-radius:3px;display:inline-block;margin-right:5px}
+canvas{width:100%;height:230px;background:#0a1a29;border-radius:8px;margin-top:12px}.stats{display:flex;gap:24px;align-items:center}.pill{border:1px solid var(--line);padding:8px 12px;border-radius:9px}.ok{color:var(--green)}
+table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted)}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}.points{grid-template-columns:1fr 1fr}header{align-items:flex-start;gap:12px;flex-direction:column}}
+</style></head>
 <body>
-  <h1>Drive Congestion Collector</h1>
-  <div class="card">
-    <div id="status">Loading...</div>
-  </div>
-  <div class="card">
-    <h2>Recent samples</h2>
-    <table>
-      <thead><tr><th>Time</th><th>Current</th><th>Free flow</th><th>Slowdown</th><th>Confidence</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </div>
+<header><div><h1>401 Traffic Monitor</h1><div class="sub">East Oshawa ↔ Pickering · live conditions and learned congestion patterns</div></div>
+<div class="stats"><div><span class="ok">● Collector Running</span><div class="muted" id="schedule"></div></div><div class="pill" id="count">0 observations</div></div></header>
+<main>
+<div class="grid2"><section class="card"><h2>→ Westbound (Cottage → Home)</h2><div class="muted">401: East Oshawa to Pickering</div><div class="points" id="westPoints"></div><div class="track"></div><div class="dotrow" id="westDots"></div></section>
+<section class="card"><h2>← Eastbound (Home → Cottage)</h2><div class="muted">401: Pickering to East Oshawa</div><div class="points" id="eastPoints"></div><div class="track"></div><div class="dotrow" id="eastDots"></div></section></div>
+<div class="grid2"><section class="card"><h2>Westbound Historical Pattern</h2><div class="muted">Average congestion by weekday and time of day</div><div class="heatwrap"><div class="heat" id="westHeat"></div></div><div class="legend"><span><i class="sw green"></i>Free flowing</span><span><i class="sw yellow"></i>Moderate</span><span><i class="sw orange"></i>Slow</span><span><i class="sw red"></i>Heavy</span></div></section>
+<section class="card"><h2>Eastbound Historical Pattern</h2><div class="muted">Average congestion by weekday and time of day</div><div class="heatwrap"><div class="heat" id="eastHeat"></div></div><div class="legend"><span><i class="sw green"></i>Free flowing</span><span><i class="sw yellow"></i>Moderate</span><span><i class="sw orange"></i>Slow</span><span><i class="sw red"></i>Heavy</span></div></section></div>
+<div class="grid2"><section class="card"><h2>Typical Day — Westbound</h2><div class="muted">Average speed by time of day across all checkpoints</div><canvas id="westChart" width="700" height="230"></canvas></section>
+<section class="card"><h2>Typical Day — Eastbound</h2><div class="muted">Average speed by time of day across all checkpoints</div><canvas id="eastChart" width="700" height="230"></canvas></section></div>
+<section class="card"><h2>Live vs Typical at This Time</h2><table><thead><tr><th>Direction</th><th>Location</th><th>Live speed</th><th>Typical</th><th>Difference</th></tr></thead><tbody id="comparison"></tbody></table></section>
+</main>
 <script>
-async function load() {
-  const [status, samples] = await Promise.all([
-    fetch('/api/status').then(r=>r.json()),
-    fetch('/api/samples').then(r=>r.json())
-  ]);
-
-  const last = status.lastSample;
-  document.getElementById('status').innerHTML = last
-    ? `<div class="big">${last.currentSpeedKph ?? '—'} km/h</div>
-       <div>Free flow: ${last.freeFlowSpeedKph ?? '—'} km/h · Last check: ${new Date(last.timestamp).toLocaleString()}</div>
-       <div>${last.error ? 'Error: ' + last.error : ''}</div>`
-    : 'No samples yet.';
-
-  const recent = samples.slice(-50).reverse();
-  document.getElementById('rows').innerHTML = recent.map(s => {
-    const slowdown = (s.currentSpeedKph != null && s.freeFlowSpeedKph)
-      ? Math.round((1 - s.currentSpeedKph / s.freeFlowSpeedKph) * 100) + '%'
-      : '—';
-    return `<tr>
-      <td>${new Date(s.timestamp).toLocaleString()}</td>
-      <td>${s.currentSpeedKph ?? '—'}</td>
-      <td>${s.freeFlowSpeedKph ?? '—'}</td>
-      <td>${slowdown}</td>
-      <td>${s.confidence ?? '—'}</td>
-    </tr>`;
-  }).join('');
-}
-load();
-setInterval(load, 30000);
-</script>
-</body>
-</html>
+const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'], hours=Array.from({length:17},(_,i)=>i+5);
+const val=(o,...keys)=>{for(const k of keys)if(o?.[k]!==undefined)return o[k];return null};
+const dir=s=>String(val(s,'direction','Direction')||'').toUpperCase();
+const ts=s=>new Date(val(s,'timestamp','Timestamp'));
+const speed=s=>+val(s,'currentSpeedKph','CurrentSpeedKph');
+const free=s=>+val(s,'freeFlowSpeedKph','FreeFlowSpeedKph');
+const label=s=>val(s,'label','Label')||val(s,'pointId','PointId')||'';
+function severity(s){if(!s||!free(s))return'cell';let ratio=speed(s)/free(s);return ratio>=.85?'green':ratio>=.70?'yellow':ratio>=.5?'orange':'red'}
+function avg(a,fn){let x=a.map(fn).filter(Number.isFinite);return x.length?x.reduce((p,c)=>p+c,0)/x.length:null}
+function latestByPoint(samples,d){let m=new Map();samples.filter(s=>dir(s)===d).forEach(s=>{let k=label(s);if(!m.has(k)||ts(s)>ts(m.get(k)))m.set(k,s)});return [...m.values()]}
+function renderPoints(samples,d,id,dots){let a=latestByPoint(samples,d); if(d==='EASTBOUND')a.reverse();document.getElementById(id).innerHTML=a.map(s=>`<div class="point"><b>${label(s)}</b><div class="speed" style="color:var(--${severity(s)})">${Number.isFinite(speed(s))?Math.round(speed(s)):'—'} km/h</div><div class="muted">Free-flow: ${Number.isFinite(free(s))?Math.round(free(s)):'—'}</div></div>`).join('')||'<div class="muted">Waiting for samples…</div>';document.getElementById(dots).innerHTML=a.map(s=>`<i class="dot ${severity(s)}"></i>`).join('')}
+function heat(samples,d,id){let el=document.getElementById(id),out='<div></div>'+hours.map(h=>`<div class=time>${h>12?h-12:h}${h>=12?'p':'a'}</div>`).join('');for(let day=1;day<=7;day++){let di=day%7;out+=`<div class=label>${days[di]}</div>`;for(const h of hours){let a=samples.filter(s=>dir(s)===d&&ts(s).getDay()===di&&ts(s).getHours()===h);let ratio=avg(a,s=>speed(s)/free(s));let c=!ratio?'cell':ratio>=.85?'green':ratio>=.70?'yellow':ratio>=.5?'orange':'red';out+=`<div class="cell ${c}" title="${days[di]} ${h}:00 · ${a.length} samples"></div>`}}el.innerHTML=out}
+function chart(samples,d,id){let c=document.getElementById(id),x=c.getContext('2d'),W=c.width,H=c.height;x.clearRect(0,0,W,H);x.strokeStyle='#29465f';x.fillStyle='#9db0c4';x.font='11px system-ui';for(let y=0;y<=120;y+=30){let py=H-25-y/120*(H-40);x.beginPath();x.moveTo(35,py);x.lineTo(W-10,py);x.stroke();x.fillText(y,5,py+4)}let vals=hours.map(h=>avg(samples.filter(s=>dir(s)===d&&ts(s).getHours()===h),speed));x.strokeStyle=d==='WESTBOUND'?'#ffd43b':'#36dc79';x.lineWidth=3;x.beginPath();vals.forEach((v,i)=>{if(v==null)return;let px=35+i/(hours.length-1)*(W-50),py=H-25-Math.min(120,v)/120*(H-40);if(i===0||vals.slice(0,i).every(z=>z==null))x.moveTo(px,py);else x.lineTo(px,py)});x.stroke();hours.forEach((h,i)=>{let px=35+i/(hours.length-1)*(W-50);x.fillText(h>12?h-12:h,px-3,H-7)})}
+function comparison(samples){let now=new Date(), latest=[...latestByPoint(samples,'WESTBOUND'),...latestByPoint(samples,'EASTBOUND')];document.getElementById('comparison').innerHTML=latest.map(s=>{let typical=avg(samples.filter(x=>dir(x)===dir(s)&&label(x)===label(s)&&ts(x).getDay()===now.getDay()&&ts(x).getHours()===now.getHours()),speed);let diff=typical==null?'—':Math.round(speed(s)-typical);return`<tr><td>${dir(s)==='WESTBOUND'?'WB':'EB'}</td><td>${label(s)}</td><td>${Math.round(speed(s)||0}</td><td>${typical==null?'—':Math.round(typical)}</td><td>${diff}</td></tr>`}).join('')}
+async function load(){let [status,samples]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/samples').then(r=>r.json())]);document.getElementById('schedule').textContent=`Daily ${status.schedule?.startHour||5}:00–${status.schedule?.endHour||22}:00 · every ${status.schedule?.intervalMinutes||20} min`;document.getElementById('count').textContent=`${samples.length.toLocaleString()} observations`;renderPoints(samples,'WESTBOUND','westPoints','westDots');renderPoints(samples,'EASTBOUND','eastPoints','eastDots');heat(samples,'WESTBOUND','westHeat');heat(samples,'EASTBOUND','eastHeat');chart(samples,'WESTBOUND','westChart');chart(samples,'EASTBOUND','eastChart');comparison(samples)}
+load();setInterval(load,30000);
+</script></body></html>
