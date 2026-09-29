@@ -59,7 +59,7 @@ public sealed class TrafficPointStore
                 return JsonSerializer.Deserialize<List<TrafficPoint>>(File.ReadAllText(_path)) ?? new();
         }
         catch { }
-        return _points.Get();
+        return _config.GetSection("Collector:Points").Get<List<TrafficPoint>>() ?? new();
     }
 
     public List<TrafficPoint> Get() { lock (_gate) return _points.ToList(); }
