@@ -118,6 +118,8 @@ public sealed class TrafficCollectorService : BackgroundService
     private readonly TrafficStore _store;
     private readonly IConfiguration _config;
     private readonly TrafficCollectorServiceTrigger _trigger;
+    private readonly Dictionary<string, BoundTrafficPoint> _boundPoints = new();
+    private readonly SemaphoreSlim _bindGate = new(1, 1);
 
     public TrafficCollectorService(
         IHttpClientFactory httpClientFactory,
@@ -170,12 +172,102 @@ public sealed class TrafficCollectorService : BackgroundService
         if (string.IsNullOrWhiteSpace(apiKey) || points.Count == 0)
             return;
 
+        // Bind each configured checkpoint to the intended Hwy 401 carriageway once per
+        // process. Recurring Flow requests then use the TomTom-projected 401 coordinate
+        // instead of asking Flow to choose whichever road happens to be nearest the raw point.
+        await EnsurePointsBoundTo401Async(apiKey, points, ct);
+
         foreach (var point in points)
         {
             if (ct.IsCancellationRequested) break;
-            await CollectPointAsync(apiKey, point, ct);
+            if (_boundPoints.TryGetValue(point.Id, out var bound))
+                await CollectPointAsync(apiKey, point, bound, ct);
+            else
+                await StoreUnboundPointAsync(point, ct);
         }
     }
+
+    private sealed record BoundTrafficPoint(string Point, double Latitude, double Longitude, string? RoadName, string? RoadNumbers, int Frc, double SpeedLimitKph);
+
+    private async Task EnsurePointsBoundTo401Async(string apiKey, List<TrafficPoint> points, CancellationToken ct)
+    {
+        if (points.All(p => _boundPoints.ContainsKey(p.Id))) return;
+        await _bindGate.WaitAsync(ct);
+        try
+        {
+            foreach (var point in points)
+            {
+                if (_boundPoints.ContainsKey(point.Id)) continue;
+                var bound = await BindPointTo401Async(apiKey, point, ct);
+                if (bound is not null) _boundPoints[point.Id] = bound;
+            }
+        }
+        finally { _bindGate.Release(); }
+    }
+
+    private async Task<BoundTrafficPoint?> BindPointTo401Async(string apiKey, TrafficPoint p, CancellationToken ct)
+    {
+        try
+        {
+            var parts = p.Point.Split(',');
+            var lat = double.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+            var lon = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+            var heading = p.Heading ?? (p.Direction == "WESTBOUND" ? 270d : 90d);
+            var rad = heading * Math.PI / 180d;
+            const double metres = 120d;
+            var dLat = (metres * Math.Cos(rad)) / 111320d;
+            var dLon = (metres * Math.Sin(rad)) / (111320d * Math.Cos(lat * Math.PI / 180d));
+            var lat1 = lat - dLat / 2; var lon1 = lon - dLon / 2;
+            var lat2 = lat + dLat / 2; var lon2 = lon + dLon / 2;
+            var pts = $"{lon1.ToString(System.Globalization.CultureInfo.InvariantCulture)},{lat1.ToString(System.Globalization.CultureInfo.InvariantCulture)};{lon2.ToString(System.Globalization.CultureInfo.InvariantCulture)},{lat2.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            var headings = $"{heading.ToString(System.Globalization.CultureInfo.InvariantCulture)};{heading.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            var fields = "{projectedPoints{geometry{coordinates},properties{snapResult}},route{properties{frc,address{roadName,roadNumbers},speedLimits{value,unit,type}}}}";
+            var url = $"https://api.tomtom.com/snapToRoads/1?key={Uri.EscapeDataString(apiKey)}&points={Uri.EscapeDataString(pts)}&headings={Uri.EscapeDataString(headings)}&fields={Uri.EscapeDataString(fields)}&vehicleType=PassengerCar&measurementSystem=metric&offroadMargin=100";
+            using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
+            response.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var root = doc.RootElement;
+
+            double? plat = null, plon = null, limit = null;
+            string? road = null, nums = null;
+            int? frc = null;
+            if (root.TryGetProperty("projectedPoints", out var pp) && pp.ValueKind == JsonValueKind.Array && pp.GetArrayLength() > 0)
+            {
+                var middle = pp[pp.GetArrayLength() / 2];
+                var coords = middle.GetProperty("geometry").GetProperty("coordinates");
+                if (coords.GetArrayLength() >= 2) { plon = coords[0].GetDouble(); plat = coords[1].GetDouble(); }
+            }
+            if (root.TryGetProperty("route", out var route) && route.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in route.EnumerateArray())
+                {
+                    if (!el.TryGetProperty("properties", out var pr)) continue;
+                    if (frc is null && pr.TryGetProperty("frc", out var f) && f.TryGetInt32(out var fi)) frc = fi;
+                    if (pr.TryGetProperty("address", out var ad))
+                    {
+                        if (road is null && ad.TryGetProperty("roadName", out var rn)) road = rn.GetString();
+                        if (nums is null && ad.TryGetProperty("roadNumbers", out var rns)) nums = rns.ValueKind == JsonValueKind.Array ? string.Join(",", rns.EnumerateArray().Select(x => x.GetString())) : rns.ToString();
+                    }
+                    if (limit is null && pr.TryGetProperty("speedLimits", out var sl) && sl.ValueKind == JsonValueKind.Array && sl.GetArrayLength() > 0 && sl[0].TryGetProperty("value", out var sv) && sv.TryGetDouble(out var sd)) limit = sd;
+                }
+            }
+
+            // FRC 0 plus a highway-speed limit is the same validation rule exposed by
+            // /api/validate-points. Do not collect a nearby ramp/local-road result.
+            if (plat is null || plon is null || frc != 0 || limit is null || limit < 90) return null;
+            var boundPoint = $"{plat.Value.ToString("F6", System.Globalization.CultureInfo.InvariantCulture)},{plon.Value.ToString("F6", System.Globalization.CultureInfo.InvariantCulture)}";
+            return new BoundTrafficPoint(boundPoint, plat.Value, plon.Value, road, nums, frc.Value, limit.Value);
+        }
+        catch { return null; }
+    }
+
+    private Task StoreUnboundPointAsync(TrafficPoint point, CancellationToken ct) =>
+        _store.AppendAsync(new TrafficSample(
+            DateTimeOffset.Now, "tomtom-flow-segment",
+            point.Id, point.Label, point.Direction,
+            null, null, null, null, null, null, null,
+            point.Point, null, null, null, false,
+            "Checkpoint not bound to a validated Hwy 401 FRC0/highway-speed segment; Flow request skipped."), ct);
 
     private string? LoadTomTomApiKey()
     {
@@ -244,12 +336,12 @@ public sealed class TrafficCollectorService : BackgroundService
         return results;
     }
 
-    private async Task CollectPointAsync(string apiKey, TrafficPoint point, CancellationToken ct)
+    private async Task CollectPointAsync(string apiKey, TrafficPoint point, BoundTrafficPoint bound, CancellationToken ct)
     {
         try
         {
             var client = _httpClientFactory.CreateClient();
-            var url = $"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/12/json?point={Uri.EscapeDataString(point.Point)}&unit=KMPH&key={Uri.EscapeDataString(apiKey)}";
+            var url = $"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/12/json?point={Uri.EscapeDataString(bound.Point)}&unit=KMPH&key={Uri.EscapeDataString(apiKey)}";
             using var response = await client.GetAsync(url, ct);
             response.EnsureSuccessStatusCode();
 
