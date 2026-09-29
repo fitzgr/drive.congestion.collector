@@ -3,6 +3,7 @@ using System.Text.Json;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TrafficStore>();
+builder.Services.AddSingleton<TrafficPointStore>();
 builder.Services.AddSingleton<TrafficCollectorServiceTrigger>();
 builder.Services.AddSingleton<TrafficCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficCollectorService>());
@@ -13,6 +14,15 @@ app.UseStaticFiles();
 
 app.MapGet("/api/status", (TrafficStore store, IConfiguration config) =>
     Results.Ok(store.GetStatus(config)));
+app.MapGet("/api/points", (TrafficPointStore points) => Results.Ok(points.Get()));
+app.MapPut("/api/points", async (List<TrafficPoint> value, TrafficPointStore points, TrafficCollectorService service, CancellationToken ct) =>
+{
+    var error = TrafficPointStore.Validate(value);
+    if (error is not null) return Results.BadRequest(new { error });
+    await points.SaveAsync(value, ct);
+    service.InvalidateBindings();
+    return Results.Ok(points.Get());
+});
 app.MapGet("/api/samples", async (TrafficStore store, CancellationToken ct) =>
     Results.Ok(await store.ReadSamplesAsync(ct)));
 app.MapPost("/api/validate-points", async (TrafficCollectorService service, CancellationToken ct) => Results.Ok(await service.ValidatePointsAsync(ct)));
@@ -26,6 +36,59 @@ app.Run();
 
 public sealed record TrafficPoint(string Id, string Label, string Direction, string Point, double? Heading = null);
 public sealed record PointValidation(string Id, string Label, string Direction, string RequestedPoint, double? ProjectedLatitude, double? ProjectedLongitude, string? RoadName, string? RoadNumbers, int? Frc, double? SpeedLimitKph, string Status, string? Error);
+
+public sealed class TrafficPointStore
+{
+    private readonly string _path = Path.Combine(AppContext.BaseDirectory, "data", "points.json");
+    private readonly IConfiguration _config;
+    private readonly object _gate = new();
+    private List<TrafficPoint> _points;
+
+    public TrafficPointStore(IConfiguration config)
+    {
+        _config = config;
+        Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+        _points = Load();
+    }
+
+    private List<TrafficPoint> Load()
+    {
+        try
+        {
+            if (File.Exists(_path))
+                return JsonSerializer.Deserialize<List<TrafficPoint>>(File.ReadAllText(_path)) ?? new();
+        }
+        catch { }
+        return _points.Get();
+    }
+
+    public List<TrafficPoint> Get() { lock (_gate) return _points.ToList(); }
+
+    public async Task SaveAsync(List<TrafficPoint> points, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(points, new JsonSerializerOptions { WriteIndented = true });
+        await File.WriteAllTextAsync(_path, json, ct);
+        lock (_gate) _points = points.ToList();
+    }
+
+    public static string? Validate(List<TrafficPoint> points)
+    {
+        if (points.Count == 0) return "At least one checkpoint is required.";
+        if (points.Any(p => string.IsNullOrWhiteSpace(p.Id) || string.IsNullOrWhiteSpace(p.Label))) return "Every point needs an id and label.";
+        if (points.GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1)) return "Point ids must be unique.";
+        foreach (var p in points)
+        {
+            if (p.Direction is not ("WESTBOUND" or "EASTBOUND")) return $"{p.Id}: direction must be WESTBOUND or EASTBOUND.";
+            var parts = p.Point.Split(',');
+            if (parts.Length != 2 ||
+                !double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lat) ||
+                !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lon) ||
+                lat is < -90 or > 90 || lon is < -180 or > 180)
+                return $"{p.Id}: point must be latitude,longitude.";
+        }
+        return null;
+    }
+}
 
 public sealed record TrafficSample(
     DateTimeOffset Timestamp,
@@ -118,6 +181,7 @@ public sealed class TrafficCollectorService : BackgroundService
     private readonly TrafficStore _store;
     private readonly IConfiguration _config;
     private readonly TrafficCollectorServiceTrigger _trigger;
+    private readonly TrafficPointStore _points;
     private readonly Dictionary<string, BoundTrafficPoint> _boundPoints = new();
     private readonly SemaphoreSlim _bindGate = new(1, 1);
 
@@ -125,12 +189,19 @@ public sealed class TrafficCollectorService : BackgroundService
         IHttpClientFactory httpClientFactory,
         TrafficStore store,
         IConfiguration config,
-        TrafficCollectorServiceTrigger trigger)
+        TrafficCollectorServiceTrigger trigger,
+        TrafficPointStore points)
     {
         _httpClientFactory = httpClientFactory;
         _store = store;
         _config = config;
         _trigger = trigger;
+        _points = points;
+    }
+
+    public void InvalidateBindings()
+    {
+        lock (_boundPoints) _boundPoints.Clear();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -167,7 +238,7 @@ public sealed class TrafficCollectorService : BackgroundService
     private async Task CollectAllAsync(CancellationToken ct, bool manual = false)
     {
         var apiKey = LoadTomTomApiKey();
-        var points = _config.GetSection("Collector:Points").Get<List<TrafficPoint>>() ?? new();
+        var points = _points.Get();
 
         if (string.IsNullOrWhiteSpace(apiKey) || points.Count == 0)
             return;
@@ -284,7 +355,7 @@ public sealed class TrafficCollectorService : BackgroundService
     public async Task<List<PointValidation>> ValidatePointsAsync(CancellationToken ct)
     {
         var key = LoadTomTomApiKey();
-        var points = _config.GetSection("Collector:Points").Get<List<TrafficPoint>>() ?? new();
+        var points = _points.Get();
         var results = new List<PointValidation>();
         if (string.IsNullOrWhiteSpace(key)) return results;
 
