@@ -60,6 +60,22 @@ Flow requests explicitly use **KMPH**, and samples include current speed and fre
 
 A low current speed can therefore represent real congestion. A suspicious low free-flow speed should still be reviewed, but the collector no longer intentionally relies on Flow's nearest-road choice from the raw checkpoint.
 
+## Verify and edit Hwy 401 checkpoints
+
+The dashboard now includes a **Verify & Edit Hwy 401 Checkpoints** panel. It is the working source for checkpoint maintenance after the first save.
+
+- **Verify 401 Matches** runs the configured points through TomTom directional Snap-to-Roads and shows the matched road, road number, FRC, speed limit and projected coordinate.
+- A green **VALIDATED_401** result means the current validation rule passed: FRC 0 and a speed limit of at least 90 km/h.
+- **Add point** creates another editable checkpoint.
+- **Remove** deletes a checkpoint from the editable list.
+- ID, label, east/west direction, latitude/longitude and optional heading can all be edited.
+- **Save points** writes the edited set to `data/points.json` and invalidates the in-memory road bindings so the collector must bind the new points again.
+- **Collect now** triggers an immediate traffic collection using only points that can be rebound to a validated 401 match.
+
+The original points in `appsettings.json` remain the seed/default configuration. Once `data/points.json` exists, the editable point store is loaded from that file so dashboard edits survive application restarts without rewriting source-controlled configuration.
+
+A failed/review match is deliberately not used for recurring Flow collection. Edit its coordinate or heading and verify again until it binds to the intended Hwy 401 carriageway.
+
 ## API key
 
 Preferred local setup is a key file:
