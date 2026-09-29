@@ -48,9 +48,17 @@ POST /api/validate-points
 
 ### Traffic Flow Segment Data — recurring collection
 
-Once checkpoints are validated, recurring collection uses TomTom Flow Segment Data. Requests explicitly use **KMPH**, and samples include current speed and free-flow speed.
+Recurring collection is now **bound to the validated Hwy 401 road match**, rather than sending the original approximate checkpoint directly to Flow Segment Data.
 
-A low current speed by itself can indicate congestion. A low **free-flow** speed is instead a warning that the query may have matched a ramp or another nearby road rather than the Hwy 401 mainline.
+At process startup / first collection, each checkpoint is map-matched with TomTom Snap to Roads using its intended eastbound or westbound heading. A checkpoint is accepted only when the match is **FRC 0** with a highway-speed limit (90 km/h or greater). The TomTom-projected coordinate from that validated 401 match is cached for the running process.
+
+Every subsequent 20-minute Flow Segment request uses that **projected Hwy 401 coordinate**. If a checkpoint cannot be validated as Hwy 401, its Flow request is skipped and an error sample is stored instead of silently collecting a nearby ramp or local road.
+
+This adds only the setup Snap-to-Roads calls once per process; it does not double API usage on every 20-minute cycle.
+
+Flow requests explicitly use **KMPH**, and samples include current speed and free-flow speed. The original requested checkpoint and TomTom Flow matched coordinates are both retained so road binding can be inspected during testing.
+
+A low current speed can therefore represent real congestion. A suspicious low free-flow speed should still be reviewed, but the collector no longer intentionally relies on Flow's nearest-road choice from the raw checkpoint.
 
 ## API key
 
@@ -126,4 +134,4 @@ Manual Flow collection works outside the normal collection window, so setup/test
 
 The original latitude/longitude checkpoints were approximate. Initial Flow Segment testing showed several suspicious matches with free-flow speeds around 44–71 km/h, while one correctly matched-looking Hwy 401 segment returned about 113 km/h.
 
-For that reason, **the current setup/test samples should not yet be treated as the official historical dataset**. Run Snap-to-Roads validation, correct any checkpoints that do not map to the Hwy 401 mainline, verify both directions, then reset `traffic.jsonl` and begin Day 1.
+For that reason, **the current setup/test samples should not yet be treated as the official historical dataset**. The collector now binds recurring requests to validated FRC0/highway-speed Snap-to-Roads results and refuses to collect unvalidated checkpoints. Test all ten checkpoints in both directions, inspect requested versus matched positions and free-flow speeds, then reset `traffic.jsonl` and begin Day 1.
